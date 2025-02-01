@@ -1,247 +1,265 @@
 #!/usr/bin/env python-real
 
-from slicer.util import pip_install
 import argparse
 import sys
-import os
+from pathlib import Path
+from typing import NamedTuple
+import logging
+from datetime import datetime
+
+import torch
 import numpy as np
-
-
-
-
-
-
-
-def InstallDependencies():
-  # Install dependencies
-  import platform 
-  system = platform.system()
-  print('Installing dependencies...')
-  pip_install('--upgrade pip')
-  pip_install('tqdm==4.64.0') # tqdm
-  pip_install('pandas==1.4.2') # pandas
-  #pip_install('--no-cache-dir torch==1.10.1+cu111 torchvision==0.11.2+cu111 torchaudio==0.10.1 -f https://download.pytorch.org/whl/torch_stable.html') # torch
-  # pip_install('--no-cache-dir torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0+cu113 --extra-index-url https://download.pytorch.org/whl/cu113')
-  pip_install('torch==1.12.0 torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu113')
-  pip_install('monai==0.7.0') # monai
-  pip_install('fvcore==0.1.5.post20220504')
-  pip_install('iopath==0.1.9')
-  if system == "Linux":
-    try:
-      code_path = '/'.join(os.path.dirname(os.path.abspath(__file__)).split('/'))
-      print(code_path)
-      pip_install(f'{code_path}/_CrownSegmentationcli/pytorch3d-0.7.0-cp39-cp39-linux_x86_64.whl') # py39_cu113_pyt1120
-    except:
-      pip_install('--force-reinstall --no-deps --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu113_pyt1120/download.html')
-
-  else:
-    raise Exception('Module only works with Linux systems.')
-    # pip_install("--force-reinstall git+https://github.com/facebookresearch/pytorch3d.git")
-
-if sys.argv[1] == '-1':
-  InstallDependencies()
-    
-
-
-else:
-  # normal execution
-  try:
-    from tqdm import tqdm
-  except ImportError:
-    pip_install('tqdm==4.64.0')
-    from tqdm import tqdm
-
-  try:
-    import pandas
-  except ImportError:
-    pip_install('pandas==1.4.2')
-
-  try:
-    import torch
-    pyt_version_str=torch.__version__.split("+")[0].replace(".", "")
-    version_str="".join([f"py3{sys.version_info.minor}_cu",torch.version.cuda.replace(".",""),f"_pyt{pyt_version_str}"])  
-    if version_str != 'py39_cu113_pyt1120':
-      raise ImportError
-  except ImportError:
-    # pip_install('--no-cache-dir torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0+cu113 --extra-index-url https://download.pytorch.org/whl/cu113')
-    pip_install('--force-reinstall torch==1.12.0 torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu113')
-    import torch
-
-
-  try:
-    import pytorch3d
-    if pytorch3d.__version__ != '0.7.0':
-      raise ImportError
-  except ImportError:
-    InstallDependencies()
-    
-
-  try:
-    import monai
-    if monai.__version__ != '0.8.dev2143':
-      raise ImportError
-  except ImportError:
-    pip_install('monai==0.7.0')
-
-
-try: 
-   import pytorch_lightning
-except ImportError :
-   pip_install('pytorch_lightning==1.7.7')
-
-
-
-
-from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
 
+from __CrownSegmentation import (
+    MonaiUNet, 
+    TeethDataset, 
+    UnitSurfTransform, 
+    Write, 
+    RemoveIslands,
+    DilateLabel, 
+    ErodeLabel, 
+    Threshold, 
+    ConvertFDI
+)
 
+# 歯のセグメンテーションに関する定数
+NUM_CLASSES = 34  # クラス数（33本の歯 + 歯肉）
+GUM_LABEL_UNIVERSAL = 33  # Universal表記での歯肉のラベル
+GUM_LABEL_FDI = 0  # FDI表記での歯肉のラベル
 
+# 後処理のパラメータ
+ISLAND_REMOVAL_THRESHOLD_MAIN = 500  # メインの島除去の閾値
+ISLAND_REMOVAL_THRESHOLD_SECONDARY = 200  # 二次的な島除去の閾値
+CLOSING_ITERATIONS = 2  # クロージング処理の反復回数
 
+# データローダーの設定
+BATCH_SIZE = 1
+NUM_WORKERS = 4
 
+class SegmentationArgs(NamedTuple):
+    input: str
+    output: str
+    subdivision_level: int
+    resolution: int
+    model: str
+    predictedId: str
+    sepOutputs: int
+    chooseFDI: int
+    logPath: str
 
-from __CrownSegmentation import (MonaiUNet, TeethDataset, UnitSurfTransform, Write, RemoveIslands, 
-                   DilateLabel, ErodeLabel, Threshold, ConvertFDI)
-
-
-
-
-
-
-def main(args):
-    print('strat crown segmentation')
-    print(f' args {args}')
-
-
-        
-    with open(args.logPath,'w') as log_f:
-        # clear log file
-        log_f.truncate(0)
-
-
-    class_weights = None
-    out_channels = 34
-
-    model = MonaiUNet( out_channels = out_channels, class_weights=class_weights, image_size=args.resolution, subdivision_level=args.subdivision_level)
-
-    model.model.module.load_state_dict(torch.load(args.model))
-
-
-    ds = TeethDataset(args.input, transform=UnitSurfTransform())
-
-    dataloader = DataLoader(ds, batch_size=1, num_workers=4, persistent_workers=True, pin_memory=True)
+def setup_logger(log_path: Path):
+    """ロガーの設定"""
+    logger = logging.getLogger('CrownSegmentation')
+    logger.setLevel(logging.INFO)
     
+    # ファイルハンドラの設定
+    fh = logging.FileHandler(log_path, mode='w')
+    fh.setLevel(logging.INFO)
+    
+    # コンソールハンドラの設定
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    
+    # フォーマットの設定
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    
+    return logger
 
-    device = torch.device('cuda')
-    model.to(device)
-    model.eval()
+def setup_model(args: SegmentationArgs):
+    """モデルのセットアップを行う"""
+    class_weights = None
 
-    softmax = torch.nn.Softmax(dim=2)
+    model = MonaiUNet(
+        out_channels=NUM_CLASSES, 
+        class_weights=class_weights, 
+        image_size=args.resolution, 
+        subdivision_level=args.subdivision_level
+    )
+    model.model.module.load_state_dict(torch.load(args.model))
+    return model.to(torch.device('cuda'))
 
-    with torch.no_grad():
+def process_predictions(surf, predictions: torch.Tensor, args: SegmentationArgs):
+    """予測結果の後処理を実行"""
+    predictions = numpy_to_vtk(predictions.cpu().numpy())
+    predictions.SetName(args.predictedId)
+    surf.GetPointData().AddArray(predictions)
 
-        for idx, batch in enumerate(dataloader):
+    # Remove islands
+    RemoveIslands(surf, predictions, GUM_LABEL_UNIVERSAL, ISLAND_REMOVAL_THRESHOLD_MAIN, ignore_neg1=True)
+    for label in tqdm(range(NUM_CLASSES), desc='Remove island'):
+        RemoveIslands(surf, predictions, label, ISLAND_REMOVAL_THRESHOLD_SECONDARY, ignore_neg1=True)
 
-            V, F, CN = batch
+    # Closing operation
+    for label in tqdm(range(1, NUM_CLASSES), desc='Closing operation'):
+        DilateLabel(surf, predictions, label, iterations=CLOSING_ITERATIONS, dilateOverTarget=False, target=None)
+        ErodeLabel(surf, predictions, label, iterations=CLOSING_ITERATIONS, target=None)
 
-            V = V.cuda(non_blocking=True)
-            F = F.cuda(non_blocking=True)
-            CN = CN.cuda(non_blocking=True).to(torch.float32)
+    return surf
 
-            x, X, PF = model((V, F, CN))
-            x = softmax(x*(PF>=0))
+def save_outputs(surf, ds_name: str, args: SegmentationArgs):
+    """結果の保存処理を実行"""
+    # 入力ファイル名から拡張子を除去し、.vtkを付加
+    output_path = Path(args.output)
+    output_fn = output_path / f"{Path(ds_name).stem}.vtk"
+    output_path.mkdir(parents=True, exist_ok=True)
 
-            P_faces = torch.zeros(out_channels, F.shape[1]).to(device)
-            V_labels_prediction = torch.zeros(V.shape[1]).to(device).to(torch.int64)
+    if args.chooseFDI:
+        surf = ConvertFDI(surf, args.predictedId)
+        gum_label = GUM_LABEL_FDI
+    else:
+        gum_label = GUM_LABEL_UNIVERSAL
 
-            PF = PF.squeeze()
-            x = x.squeeze()
+    if args.sepOutputs:
+        surf_point_data = surf.GetPointData().GetScalars(args.predictedId)
+        labels = vtk_to_numpy(surf_point_data)
+        out_basename = output_fn.with_suffix('')
+        
+        # 各ラベルの保存
+        for label in tqdm(np.unique(labels), desc='Isolating labels'):
+            thresh_label = Threshold(surf, args.predictedId, label-0.5, label+0.5)
+            suffix = '_gum.vtk' if label == gum_label else f'_id_{label}.vtk'
+            Write(thresh_label, str(out_basename.with_suffix(suffix)), print_out=False)
+        
+        # 歯全体の保存
+        no_gum = Threshold(surf, args.predictedId, gum_label-0.5, gum_label+0.5, invert=True)
+        Write(no_gum, str(out_basename.with_suffix('_all_teeth.vtk')), print_out=False)
 
-            for pf, pred in zip(PF, x):
-                P_faces[:, pf] += pred
+    Write(surf, str(output_fn), print_out=False)
 
-            P_faces = torch.argmax(P_faces, dim=0)
+def main(args: SegmentationArgs):
+    start_time = datetime.now()
+    logger = setup_logger(Path(args.logPath))
+    
+    logger.info("Crown segmentation started")
+    logger.info(f"Input file: {Path(args.input).absolute()}")
+    logger.info(f"Output directory: {Path(args.output).absolute()}")
+    logger.info(f"Model path: {Path(args.model).absolute()}")
+    logger.info(f"Settings - Subdivision level: {args.subdivision_level}")
+    logger.info(f"Settings - Resolution: {args.resolution}")
+    logger.info(f"Settings - Predicted ID: {args.predictedId}")
+    logger.info(f"Settings - Separate outputs: {args.sepOutputs}")
+    logger.info(f"Settings - FDI notation: {args.chooseFDI}")
 
-            faces_pid0 = F[0,:,0]
-            V_labels_prediction[faces_pid0] = P_faces
+    try:
+        model = setup_model(args)
+        logger.info("Model loaded successfully")
+        
+        ds = TeethDataset(args.input, transform=UnitSurfTransform())
+        dataloader = DataLoader(
+            ds, 
+            batch_size=BATCH_SIZE, 
+            num_workers=NUM_WORKERS, 
+            persistent_workers=True, 
+            pin_memory=True
+        )
+        logger.info(f"Dataset loaded with {len(ds)} files")
+        
+        model.eval()
+        softmax = torch.nn.Softmax(dim=2)
 
-            surf = ds.getSurf(idx)
+        with torch.no_grad():
+            for idx, batch in enumerate(dataloader):
+                current_file = ds.getName(idx)
+                logger.info(f"Processing file {idx + 1}/{len(ds)}: {current_file}")
 
-            V_labels_prediction = numpy_to_vtk(V_labels_prediction.cpu().numpy())
-            V_labels_prediction.SetName(args.predictedId)
-            surf.GetPointData().AddArray(V_labels_prediction)
+                V, F, CN = [b.cuda(non_blocking=True) for b in batch]
+                CN = CN.to(torch.float32)
 
+                x, X, PF = model((V, F, CN))
+                x = softmax(x*(PF>=0))
 
-            #Post Process
-            RemoveIslands(surf,V_labels_prediction,33,500, ignore_neg1=True)
-            for label in tqdm(range(out_channels),desc= 'Remove island'):
-                RemoveIslands(surf,V_labels_prediction, label, 200, ignore_neg1=True)
+                # 予測処理
+                P_faces = torch.zeros(NUM_CLASSES, F.shape[1], device=V.device)
+                V_labels_prediction = torch.zeros(V.shape[1], device=V.device, dtype=torch.int64)
 
+                PF = PF.squeeze()
+                x = x.squeeze()
 
+                for pf, pred in zip(PF, x):
+                    P_faces[:, pf] += pred
 
+                P_faces = torch.argmax(P_faces, dim=0)
+                V_labels_prediction[F[0,:,0]] = P_faces
 
-            for label in tqdm(range(1,out_channels),desc= 'Closing operation'):
-                DilateLabel(surf,V_labels_prediction, label, iterations=2, dilateOverTarget=False, target = None)
-                ErodeLabel(surf,V_labels_prediction, label, iterations=2, target=None)
+                # 後処理と保存
+                surf = ds.getSurf(idx)
+                surf = process_predictions(surf, V_labels_prediction, args)
+                save_outputs(surf, current_file, args)
+                logger.info(f"Completed processing {current_file}")
 
+        processing_time = datetime.now() - start_time
+        logger.info(f"All processing completed. Total time: {processing_time}")
 
-            if args.chooseFDI :
-                surf = ConvertFDI(surf,args.predicteId)
-                gum_label = 0
-            else :
-                gum_label = 33
-
-
-
-
-            output_fn = os.path.join(args.output, ds.getName(idx))
-
-            output_dir = os.path.dirname(output_fn)
-
-            if(not os.path.exists(output_dir)):
-                os.makedirs(output_dir)
-
-
-
-
-            if args.sepOutputs:
-                # Isolate each label
-                surf_point_data = surf.GetPointData().GetScalars(args.predictedId) 
-                labels = np.unique(surf_point_data)
-                out_basename = output_fn[:-4]
-                for label in tqdm(labels, desc = 'Isolating labels'):
-                    thresh_label = Threshold(surf, args.predictedId ,label-0.5,label+0.5)
-                    if label != gum_label:
-                        Write(thresh_label,f'{out_basename}_id_{label}.vtk',print_out=False) 
-                    else:
-                    # gum
-                        Write(thresh_label,f'{out_basename}_gum.vtk',print_out=False) 
-                # all teeth 
-                no_gum = Threshold(surf, args.predictedId ,gum_label-0.5,gum_label+0.5,invert=True)
-                Write(no_gum,f'{out_basename}_all_teeth.vtk',print_out=False)
-
-
-            Write(surf , output_fn, print_out=False)
-
-            with open(args.logPath,'r+') as log_f :
-               log_f.write(str(idx))
-
-
-
-
+    except Exception as e:
+        logger.error(f"Error occurred: {str(e)}", exc_info=True)
+        raise
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('input',type=str)
-    parser.add_argument('output',type=str)
-    parser.add_argument('subdivision_level',type = int)
-    parser.add_argument('resolution',type=int)
-    parser.add_argument('model',type=str)
-    parser.add_argument('predictedId',type=str)
-    parser.add_argument('sepOutputs',type=int)
-    parser.add_argument('chooseFDI',type=int)
-    parser.add_argument('logPath',type=str)
+    parser = argparse.ArgumentParser(
+        description='Crown Segmentation CLI tool for dental mesh processing'
+    )
+    parser.add_argument(
+        'input',
+        type=str,
+        help='Input mesh file path (.vtk format)'
+    )
+    parser.add_argument(
+        'output',
+        type=str,
+        help='Output directory path for segmented results'
+    )
+    parser.add_argument(
+        'subdivision_level',
+        type=int,
+        default=4,
+        help='Subdivision level for mesh processing (default: 4)'
+    )
+    parser.add_argument(
+        'resolution',
+        type=int,
+        default=320,
+        help='Resolution for image processing (default: 320)'
+    )
+    parser.add_argument(
+        'model',
+        type=str,
+        help='Path to the trained model weights file'
+    )
+    parser.add_argument(
+        'predictedId',
+        type=str,
+        default='PredictedID',
+        help='Name of the predicted label array (default: PredictedID)'
+    )
+    parser.add_argument(
+        'sepOutputs',
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help='Whether to separate output files by tooth (0: No, 1: Yes, default: 0)'
+    )
+    parser.add_argument(
+        'chooseFDI',
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help='Whether to use FDI notation (0: Universal, 1: FDI, default: 1)'
+    )
+    parser.add_argument(
+        'logPath',
+        type=str,
+        default='crown_segmentation.log',
+        help='Path to the log file (default: crown_segmentation.log)'
+    )
 
-    args = parser.parse_args()
+    args = SegmentationArgs(**vars(parser.parse_args()))
     main(args)
 

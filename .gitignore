@@ -1,2 +1,6 @@
 # exclude pycache (.pyc) files
 *.pyc
+*.stl
+*.ply
+*.vtk
+*.pth
