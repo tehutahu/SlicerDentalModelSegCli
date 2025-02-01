@@ -106,10 +106,11 @@ def process_predictions(surf, predictions: torch.Tensor, args: SegmentationArgs)
 
 def save_outputs(surf, ds_name: str, args: SegmentationArgs):
     """結果の保存処理を実行"""
-    # 入力ファイル名から拡張子を除去し、.vtkを付加
-    output_path = Path(args.output)
-    output_fn = output_path / f"{Path(ds_name).stem}.vtk"
-    output_path.mkdir(parents=True, exist_ok=True)
+    out_root = Path(args.output)
+    out_fname = Path(ds_name).with_suffix('.vtk')
+    out_dir = out_root / out_fname.name.split('_')[0] # 001_LowerJawScan.stl -> 001
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / out_fname
 
     if args.chooseFDI:
         surf = ConvertFDI(surf, args.predictedId)
@@ -118,21 +119,22 @@ def save_outputs(surf, ds_name: str, args: SegmentationArgs):
         gum_label = GUM_LABEL_UNIVERSAL
 
     if args.sepOutputs:
+        out_basename = str(output_path.with_suffix(''))  # 文字列として扱う
+        
         surf_point_data = surf.GetPointData().GetScalars(args.predictedId)
         labels = vtk_to_numpy(surf_point_data)
-        out_basename = output_fn.with_suffix('')
         
         # 各ラベルの保存
         for label in tqdm(np.unique(labels), desc='Isolating labels'):
-            thresh_label = Threshold(surf, args.predictedId, label-0.5, label+0.5)
+            thresh_label = Threshold(surf, args.predictedId, label-0.5, label+0.5, invert=True) # 1本抜け
             suffix = '_gum.vtk' if label == gum_label else f'_id_{label}.vtk'
-            Write(thresh_label, str(out_basename.with_suffix(suffix)), print_out=False)
+            Write(thresh_label, out_basename + suffix, print_out=False)  # 単純な文字列連結を使用
         
         # 歯全体の保存
         no_gum = Threshold(surf, args.predictedId, gum_label-0.5, gum_label+0.5, invert=True)
-        Write(no_gum, str(out_basename.with_suffix('_all_teeth.vtk')), print_out=False)
+        Write(no_gum, out_basename + '_all_teeth.vtk', print_out=False)  # 単純な文字列連結を使用
 
-    Write(surf, str(output_fn), print_out=False)
+    Write(surf, str(output_path), print_out=False)
 
 def main(args: SegmentationArgs):
     start_time = datetime.now()
