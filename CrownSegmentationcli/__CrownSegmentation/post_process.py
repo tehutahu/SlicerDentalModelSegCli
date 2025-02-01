@@ -139,7 +139,8 @@ def Threshold(vtkdata, labels, threshold_min, threshold_max, invert=False):
 	threshold = vtk.vtkThreshold()
 	threshold.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, labels)
 	threshold.SetInputData(vtkdata)
-	threshold.ThresholdBetween(threshold_min,threshold_max)
+	threshold.SetLowerThreshold(threshold_min)
+	threshold.SetUpperThreshold(threshold_max)
 	threshold.SetInvert(invert)
 	threshold.Update()
 
