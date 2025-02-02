@@ -6,6 +6,8 @@ from vtk.util.numpy_support import numpy_to_vtk
 from monai.transforms import ToTensor
 import torch
 import __CrownSegmentation.LinearSubdivisionFilter as lsf
+from .post_process import Threshold
+
 
 # ReadSurfの前に追加
 SUPPORTED_MESH_EXTENSIONS = {
@@ -284,3 +286,57 @@ def ConvertFDI(surf, scal):
   vtk_id.SetName(scal)
   surf.GetPointData().AddArray(vtk_id)
   return surf
+
+def SeparateLabels(surf, predicted_id: str, labels=None, output_path=None, print_out=True):
+    """指定されたラベルをまとめて分離する
+
+    Args:
+        surf: vtkPolyDataオブジェクトまたはファイルパス
+        predicted_id (str): 予測ラベルの配列名
+        labels (list, optional): 分離したいラベルのリスト。Noneの場合は全ラベルを処理
+        output_path (str, optional): 出力ファイルのパス。指定された場合はファイルを保存
+
+    Returns:
+        vtkPolyData: 指定されたラベルが分離されたsurfオブジェクト（output_pathが指定されていない場合）
+
+    Raises:
+        ValueError: 指定されたフィールド名のスカラーデータが見つからない場合
+    """
+    # 入力がパスの場合はファイルを読み込む
+    if isinstance(surf, str):
+        surf = ReadSurf(surf)
+
+    # ラベル配列の取得
+    surf_point_data = surf.GetPointData().GetScalars(predicted_id)
+    if surf_point_data is None:
+        available_arrays = [surf.GetPointData().GetArrayName(i) 
+                          for i in range(surf.GetPointData().GetNumberOfArrays())]
+        raise ValueError(
+            f"フィールド名 '{predicted_id}' のスカラーデータが見つかりません。\n"
+            f"利用可能なフィールド: {', '.join(available_arrays) if available_arrays else 'なし'}"
+        )
+
+    # 処理するラベルの決定
+    if print_out:
+        print(f"Found Labels: {np.unique(vtk_to_numpy(surf_point_data))}")
+    if labels is None:
+        labels = np.unique(vtk_to_numpy(surf_point_data))
+    
+    # 各ラベルに対してThresholdを適用
+    separated_surf = vtk.vtkPolyData()
+    separated_surf.DeepCopy(surf)
+    result = None
+    for label in labels:
+        if print_out:
+            print(f"Remove: {label}")
+        if result is None:
+            result = Threshold(separated_surf, predicted_id, label-0.5, label+0.5, invert=True)
+        else:
+            # 追加のラベルを除去
+            result = Threshold(result, predicted_id, label-0.5, label+0.5, invert=True)
+  
+    if output_path:
+        Write(result, output_path, print_out=False)
+        return None
+        
+    return result

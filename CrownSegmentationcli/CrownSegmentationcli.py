@@ -26,7 +26,8 @@ from __CrownSegmentation import (
     DilateLabel, 
     ErodeLabel, 
     Threshold, 
-    ConvertFDI
+    ConvertFDI,
+    SeparateLabels
 )
 
 # 歯のセグメンテーションに関する定数
@@ -136,20 +137,19 @@ def save_outputs(surf, ds_name: str, patient_info: dict, args: SegmentationArgs)
         gum_label = GUM_LABEL_UNIVERSAL
 
     if args.sepOutputs:
-        out_basename = str(output_path.with_suffix(''))  # 文字列として扱う
-        
+        out_basename = str(output_path.with_suffix(''))
+                
+        # 各歯のラベルを取得
         surf_point_data = surf.GetPointData().GetScalars(args.predictedId)
-        labels = vtk_to_numpy(surf_point_data)
+        labels = np.unique(vtk_to_numpy(surf_point_data))
         
-        # 各ラベルの保存
-        for label in tqdm(np.unique(labels), desc='Isolating labels'):
-            thresh_label = Threshold(surf, args.predictedId, label-0.5, label+0.5, invert=True) # 1本抜け
-            suffix = '_gum.vtk' if label == gum_label else f'_id_{label}.vtk'
-            Write(thresh_label, out_basename + suffix, print_out=False)  # 単純な文字列連結を使用
+        # id毎に1つずつ抜いて保存(歯茎抜き含む)
+        for label in tqdm(labels, desc='Isolating teeth'):
+            SeparateLabels(surf, args.predictedId, [label], out_basename + f'_id_{label}.vtk', print_out=False)
         
-        # 歯全体の保存
-        no_gum = Threshold(surf, args.predictedId, gum_label-0.5, gum_label+0.5, invert=True)
-        Write(no_gum, out_basename + '_all_teeth.vtk', print_out=False)  # 単純な文字列連結を使用
+        # 歯肉のみの保存
+        teeth_labels = [label for label in labels if label != gum_label]
+        SeparateLabels(surf, args.predictedId, teeth_labels, out_basename + '_gum.vtk', print_out=False)
 
     Write(surf, str(output_path), print_out=False)
 
@@ -248,44 +248,44 @@ if __name__ == '__main__':
         help='Output directory path for segmented results'
     )
     parser.add_argument(
-        'subdivision_level',
-        type=int,
-        default=4,
-        help='Subdivision level for mesh processing (default: 4)'
-    )
-    parser.add_argument(
-        'resolution',
-        type=int,
-        default=320,
-        help='Resolution for image processing (default: 320)'
-    )
-    parser.add_argument(
         'model',
         type=str,
         help='Path to the trained model weights file'
     )
     parser.add_argument(
-        'predictedId',
+        '--subdivision_level',
+        type=int,
+        default=4,
+        help='Subdivision level for mesh processing (default: 4)'
+    )
+    parser.add_argument(
+        '--resolution',
+        type=int,
+        default=320,
+        help='Resolution for image processing (default: 320)'
+    )
+    parser.add_argument(
+        '--predictedId',
         type=str,
         default='PredictedID',
         help='Name of the predicted label array (default: PredictedID)'
     )
     parser.add_argument(
-        'sepOutputs',
+        '--sepOutputs',
         type=int,
-        default=0,
+        default=1,
         choices=[0, 1],
-        help='Whether to separate output files by tooth (0: No, 1: Yes, default: 0)'
+        help='Whether to separate output files by tooth (0: No, 1: Yes, default: 1)'
     )
     parser.add_argument(
-        'chooseFDI',
+        '--chooseFDI',
         type=int,
         default=1,
         choices=[0, 1],
         help='Whether to use FDI notation (0: Universal, 1: FDI, default: 1)'
     )
     parser.add_argument(
-        'logPath',
+        '--logPath',
         type=str,
         default='crown_segmentation.log',
         help='Path to the log file (default: crown_segmentation.log)'
