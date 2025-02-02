@@ -1,11 +1,15 @@
 #!/usr/bin/env python-real
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import NamedTuple
 import logging
 from datetime import datetime
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import numpy as np
@@ -56,7 +60,7 @@ def setup_logger(log_path: Path):
     logger.setLevel(logging.INFO)
     
     # ファイルハンドラの設定
-    fh = logging.FileHandler(log_path, mode='w')
+    fh = logging.FileHandler(log_path, mode='a')
     fh.setLevel(logging.INFO)
     
     # コンソールハンドラの設定
@@ -104,13 +108,26 @@ def process_predictions(surf, predictions: torch.Tensor, args: SegmentationArgs)
 
     return surf
 
-def save_outputs(surf, ds_name: str, args: SegmentationArgs):
+def save_outputs(surf, ds_name: str, patient_info: dict, args: SegmentationArgs):
     """結果の保存処理を実行"""
     out_root = Path(args.output)
-    out_fname = Path(ds_name).with_suffix('.vtk')
-    out_dir = out_root / out_fname.name.split('_')[0] # 001_LowerJawScan.stl -> 001
+    
+    # 患者情報がある場合は階層的な出力構造を作成
+    if patient_info:
+        # patient_idとjaw_typeを文字列として扱う
+        out_dir = out_root / str(patient_info['patient_id']) / str(patient_info['jaw_type'])
+    else:
+        # ファイル名から出力ディレクトリを決定
+        out_fname = Path(ds_name).with_suffix('.vtk')
+        # 数字_で始まる場合はその数字を使用、それ以外はファイル名全体を使用
+        match = re.match(r'(\d+)_', out_fname.name)
+        if match:
+            out_dir = out_root / match.group(1)
+        else:
+            out_dir = out_root / out_fname.stem
+    
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / out_fname
+    output_path = out_dir / Path(ds_name).with_suffix('.vtk')
 
     if args.chooseFDI:
         surf = ConvertFDI(surf, args.predictedId)
@@ -141,7 +158,7 @@ def main(args: SegmentationArgs):
     logger = setup_logger(Path(args.logPath))
     
     logger.info("Crown segmentation started")
-    logger.info(f"Input file: {Path(args.input).absolute()}")
+    logger.info(f"Input: {Path(args.input).absolute()}")
     logger.info(f"Output directory: {Path(args.output).absolute()}")
     logger.info(f"Model path: {Path(args.model).absolute()}")
     logger.info(f"Settings - Subdivision level: {args.subdivision_level}")
@@ -169,39 +186,51 @@ def main(args: SegmentationArgs):
 
         with torch.no_grad():
             for idx, batch in enumerate(dataloader):
-                current_file = ds.getName(idx)
-                logger.info(f"Processing file {idx + 1}/{len(ds)}: {current_file}")
+                try:
+                    current_file = ds.getName(idx)
+                    patient_info = ds.getPatientInfo(idx)
+                    
+                    if patient_info:
+                        logger.info(f"Processing file {idx + 1}/{len(ds)}: {current_file} "
+                                  f"(Patient: {patient_info['patient_id']}, Jaw: {patient_info['jaw_type']})")
+                    else:
+                        logger.info(f"Processing file {idx + 1}/{len(ds)}: {current_file}")
 
-                V, F, CN = [b.cuda(non_blocking=True) for b in batch]
-                CN = CN.to(torch.float32)
+                    V, F, CN = [b.cuda(non_blocking=True) for b in batch]
+                    CN = CN.to(torch.float32)
 
-                x, X, PF = model((V, F, CN))
-                x = softmax(x*(PF>=0))
+                    x, X, PF = model((V, F, CN))
+                    x = softmax(x*(PF>=0))
 
-                # 予測処理
-                P_faces = torch.zeros(NUM_CLASSES, F.shape[1], device=V.device)
-                V_labels_prediction = torch.zeros(V.shape[1], device=V.device, dtype=torch.int64)
+                    # 予測処理
+                    P_faces = torch.zeros(NUM_CLASSES, F.shape[1], device=V.device)
+                    V_labels_prediction = torch.zeros(V.shape[1], device=V.device, dtype=torch.int64)
 
-                PF = PF.squeeze()
-                x = x.squeeze()
+                    PF = PF.squeeze()
+                    x = x.squeeze()
 
-                for pf, pred in zip(PF, x):
-                    P_faces[:, pf] += pred
+                    for pf, pred in zip(PF, x):
+                        P_faces[:, pf] += pred
 
-                P_faces = torch.argmax(P_faces, dim=0)
-                V_labels_prediction[F[0,:,0]] = P_faces
+                    P_faces = torch.argmax(P_faces, dim=0)
+                    V_labels_prediction[F[0,:,0]] = P_faces
 
-                # 後処理と保存
-                surf = ds.getSurf(idx)
-                surf = process_predictions(surf, V_labels_prediction, args)
-                save_outputs(surf, current_file, args)
-                logger.info(f"Completed processing {current_file}")
+                    # 後処理と保存
+                    surf = ds.getSurf(idx)
+                    surf = process_predictions(surf, V_labels_prediction, args)
+                    save_outputs(surf, current_file, patient_info, args)
+                    logger.info(f"Completed processing {current_file}")
+
+                except Exception as e:
+                    logger.error(f"Error processing file {current_file}: {str(e)}", exc_info=True)
+                    logger.info("Continuing with next file...")
+                    continue
 
         processing_time = datetime.now() - start_time
         logger.info(f"All processing completed. Total time: {processing_time}")
 
     except Exception as e:
-        logger.error(f"Error occurred: {str(e)}", exc_info=True)
+        logger.error(f"Critical error occurred: {str(e)}", exc_info=True)
         raise
 
 if __name__ == '__main__':
@@ -211,7 +240,7 @@ if __name__ == '__main__':
     parser.add_argument(
         'input',
         type=str,
-        help='Input mesh file path (.vtk format)'
+        help='Input path: either a mesh file (.vtk/.stl) or a CSV file containing multiple inputs'
     )
     parser.add_argument(
         'output',
@@ -262,6 +291,6 @@ if __name__ == '__main__':
         help='Path to the log file (default: crown_segmentation.log)'
     )
 
-    args = SegmentationArgs(**vars(parser.parse_args()))
-    main(args)
+    args = parser.parse_args()
+    main(SegmentationArgs(**vars(args)))
 

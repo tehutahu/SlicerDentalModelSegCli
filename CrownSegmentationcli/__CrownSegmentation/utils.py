@@ -7,6 +7,19 @@ from monai.transforms import ToTensor
 import torch
 import __CrownSegmentation.LinearSubdivisionFilter as lsf
 
+# ReadSurfの前に追加
+SUPPORTED_MESH_EXTENSIONS = {
+    '.vtk': vtk.vtkPolyDataReader,
+    '.vtp': vtk.vtkXMLPolyDataReader,
+    '.stl': vtk.vtkSTLReader,
+    '.off': 'OFFReader',  # カスタムリーダー
+    '.obj': vtk.vtkOBJReader,
+    '.gii': 'GIIReader'  # nibabelを使用
+}
+
+def get_supported_extensions():
+    """サポートされているメッシュファイルの拡張子を取得"""
+    return list(SUPPORTED_MESH_EXTENSIONS.keys())
 
 def Write(vtkdata, output_name, print_out = True):
     outfilename = output_name
@@ -23,86 +36,78 @@ def Write(vtkdata, output_name, print_out = True):
 
 
 def ReadSurf(fileName):
-
     fname, extension = os.path.splitext(fileName)
     extension = extension.lower()
-    if extension == ".vtk":
-        reader = vtk.vtkPolyDataReader()
-        reader.SetFileName(fileName)
-        reader.Update()
-        surf = reader.GetOutput()
-    elif extension == ".vtp":
-        reader = vtk.vtkXMLPolyDataReader()
-        reader.SetFileName(fileName)
-        reader.Update()
-        surf = reader.GetOutput()    
-    elif extension == ".stl":
-        reader = vtk.vtkSTLReader()
-        reader.SetFileName(fileName)
-        reader.Update()
-        surf = reader.GetOutput()
-    elif extension == ".off":
-        from readers import OFFReader
-        reader = OFFReader()
-        reader.SetFileName(fileName)
-        reader.Update()
-        surf = reader.GetOutput()
-    elif extension == ".obj":
-        if os.path.exists(fname + ".mtl"):
-            obj_import = vtk.vtkOBJImporter()
-            obj_import.SetFileName(fileName)
-            obj_import.SetFileNameMTL(fname + ".mtl")
-            textures_path = os.path.normpath(os.path.dirname(fname) + "/../images")
-            if os.path.exists(textures_path):
-                textures_path = os.path.normpath(fname.replace(os.path.basename(fname), ''))
-                obj_import.SetTexturePath(textures_path)
-            else:
-                textures_path = os.path.normpath(fname.replace(os.path.basename(fname), ''))                
-                obj_import.SetTexturePath(textures_path)
+
+    if extension not in SUPPORTED_MESH_EXTENSIONS:
+        raise ValueError(f"Unsupported file extension: {extension}. "
+                        f"Supported extensions are: {', '.join(get_supported_extensions())}")
+
+    # .objファイルの特殊処理
+    if extension == '.obj' and os.path.exists(fname + ".mtl"):
+        obj_import = vtk.vtkOBJImporter()
+        obj_import.SetFileName(fileName)
+        obj_import.SetFileNameMTL(fname + ".mtl")
+        textures_path = os.path.normpath(os.path.dirname(fname) + "/../images")
+        if os.path.exists(textures_path):
+            textures_path = os.path.normpath(fname.replace(os.path.basename(fname), ''))
+            obj_import.SetTexturePath(textures_path)
+        else:
+            textures_path = os.path.normpath(fname.replace(os.path.basename(fname), ''))                
+            obj_import.SetTexturePath(textures_path)
                     
 
-            obj_import.Read()
+        obj_import.Read()
 
-            actors = obj_import.GetRenderer().GetActors()
-            actors.InitTraversal()
-            append = vtk.vtkAppendPolyData()
+        actors = obj_import.GetRenderer().GetActors()
+        actors.InitTraversal()
+        append = vtk.vtkAppendPolyData()
 
-            for i in range(actors.GetNumberOfItems()):
-                surfActor = actors.GetNextActor()
-                append.AddInputData(surfActor.GetMapper().GetInputAsDataSet())
-            
-            append.Update()
-            surf = append.GetOutput()
-            
+        for i in range(actors.GetNumberOfItems()):
+            surfActor = actors.GetNextActor()
+            append.AddInputData(surfActor.GetMapper().GetInputAsDataSet())
+        
+        append.Update()
+        surf = append.GetOutput()
+        
+    else:
+        # 標準的なVTKリーダーの処理
+        reader_class = SUPPORTED_MESH_EXTENSIONS[extension]
+        if isinstance(reader_class, str):
+            if reader_class == 'OFFReader':
+                from readers import OFFReader
+                reader = OFFReader()
+            elif reader_class == 'GIIReader':
+                # .giiファイルの特殊処理
+                import nibabel as nib
+                surf = nib.load(fileName)
+                coords = surf.agg_data('pointset')
+                triangles = surf.agg_data('triangle')
+
+                points = vtk.vtkPoints()
+
+                for c in coords:
+                    points.InsertNextPoint(c[0], c[1], c[2])
+
+                cells = vtk.vtkCellArray()
+
+                for t in triangles:
+                    t_vtk = vtk.vtkTriangle()
+                    t_vtk.GetPointIds().SetId(0, t[0])
+                    t_vtk.GetPointIds().SetId(1, t[1])
+                    t_vtk.GetPointIds().SetId(2, t[2])
+                    cells.InsertNextCell(t_vtk)
+
+                surf = vtk.vtkPolyData()
+                surf.SetPoints(points)
+                surf.SetPolys(cells)
+                return surf
         else:
-            reader = vtk.vtkOBJReader()
-            reader.SetFileName(fileName)
-            reader.Update()
-            surf = reader.GetOutput()
-    elif extension == '.gii':
-        import nibabel as nib
-
-        surf = nib.load(fileName)
-        coords = surf.agg_data('pointset')
-        triangles = surf.agg_data('triangle')
-
-        points = vtk.vtkPoints()
-
-        for c in coords:
-            points.InsertNextPoint(c[0], c[1], c[2])
-
-        cells = vtk.vtkCellArray()
-
-        for t in triangles:
-            t_vtk = vtk.vtkTriangle()
-            t_vtk.GetPointIds().SetId(0, t[0])
-            t_vtk.GetPointIds().SetId(1, t[1])
-            t_vtk.GetPointIds().SetId(2, t[2])
-            cells.InsertNextCell(t_vtk)
-
-        surf = vtk.vtkPolyData()
-        surf.SetPoints(points)
-        surf.SetPolys(cells)
+            reader = reader_class()
+        
+        reader.SetFileName(fileName)
+        reader.Update()
+        surf = reader.GetOutput()
 
     return surf
 
