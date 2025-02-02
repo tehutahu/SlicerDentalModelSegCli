@@ -340,3 +340,79 @@ def SeparateLabels(surf, predicted_id: str, labels=None, output_path=None, print
         return None
         
     return result
+
+def WritePLY(vtkdata, output_name, predicted_id='PredictedID', print_out=True):
+    """vtkPolyDataをPLYファイルとして保存する
+    
+    Args:
+        vtkdata: vtkPolyDataオブジェクト
+        output_name: 出力ファイル名
+        predicted_id: セグメンテーションIDの配列名
+        print_out: 進捗表示の有無
+    """
+    if print_out:
+        print("Writing PLY:", output_name)
+        
+    # ポイントとポリゴンデータの取得
+    points = vtk_to_numpy(vtkdata.GetPoints().GetData())
+    polys = vtk_to_numpy(vtkdata.GetPolys().GetData()).reshape(-1, 4)[:, 1:]
+    
+    # セグメンテーションIDの取得
+    seg_ids = vtk_to_numpy(vtkdata.GetPointData().GetScalars(predicted_id))
+    
+    # PLYファイルの書き出し
+    with open(output_name, 'w') as f:
+        # ヘッダー
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {len(points)}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("property int label\n")  # セグメンテーションID
+        f.write(f"element face {len(polys)}\n")
+        f.write("property list uchar int vertex_indices\n")
+        f.write("end_header\n")
+        
+        # 頂点データ
+        for point, label in zip(points, seg_ids):
+            f.write(f"{point[0]} {point[1]} {point[2]} {int(label)}\n")
+            
+        # ポリゴンデータ
+        for poly in polys:
+            f.write(f"3 {poly[0]} {poly[1]} {poly[2]}\n")
+
+def WriteSegmentedSTL(vtkdata, output_base, predicted_id='PredictedID', print_out=True):
+    """各セグメントを個別のSTLファイルとして保存
+    
+    Args:
+        vtkdata: vtkPolyDataオブジェクト
+        output_base: 出力ファイルのベース名（拡張子なし）
+        predicted_id: セグメンテーションIDの配列名
+        print_out: 進捗表示の有無
+    """
+    if print_out:
+        print("Writing segmented STL files...")
+    
+    # セグメンテーションIDの取得
+    seg_ids = np.unique(vtk_to_numpy(vtkdata.GetPointData().GetScalars(predicted_id)))
+    
+    # STL書き出し用のwriter
+    stl_writer = vtk.vtkSTLWriter()
+    
+    # 各セグメントの処理
+    for label in seg_ids:
+        if label == 0:  # 歯肉は除外する場合
+            continue
+            
+        # セグメントの抽出
+        segment = Threshold(vtkdata, predicted_id, label-0.5, label+0.5)
+        
+        # STLファイルとして保存
+        output_name = f"{output_base}_tooth_{int(label)}.stl"
+        if print_out:
+            print(f"Writing: {output_name}")
+        
+        stl_writer.SetFileName(output_name)
+        stl_writer.SetInputData(segment)
+        stl_writer.Write()
