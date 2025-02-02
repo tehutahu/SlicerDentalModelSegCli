@@ -7,6 +7,8 @@ from monai.transforms import ToTensor
 import torch
 import __CrownSegmentation.LinearSubdivisionFilter as lsf
 from .post_process import Threshold
+from typing import List, Tuple, Union, Optional
+from pathlib import Path
 
 
 # ReadSurfの前に追加
@@ -19,13 +21,24 @@ SUPPORTED_MESH_EXTENSIONS = {
     '.gii': 'GIIReader'  # nibabelを使用
 }
 
-def get_supported_extensions():
-    """サポートされているメッシュファイルの拡張子を取得"""
+def get_supported_extensions() -> List[str]:
+    """サポートされているメッシュファイルの拡張子を取得
+
+    Returns:
+        List[str]: サポートされているファイル拡張子のリスト
+    """
     return list(SUPPORTED_MESH_EXTENSIONS.keys())
 
-def Write(vtkdata, output_name, print_out = True):
+def Write(vtkdata: 'vtk.vtkPolyData', output_name: str, print_out: bool = True) -> None:
+    """VTKデータをファイルに書き出す
+
+    Args:
+        vtkdata (vtk.vtkPolyData): 書き出すVTKデータ
+        output_name (str): 出力ファイル名
+        print_out (bool, optional): 進捗表示の有無. Defaults to True.
+    """
     outfilename = output_name
-    if print_out == True:
+    if print_out:
         print("Writing:", outfilename)
     polydatawriter = vtk.vtkPolyDataWriter()
     polydatawriter.SetFileName(outfilename)
@@ -37,7 +50,21 @@ def Write(vtkdata, output_name, print_out = True):
 
 
 
-def ReadSurf(fileName):
+def ReadSurf(fileName: Union[str, Path]) -> 'vtk.vtkPolyData':
+    """メッシュファイルを読み込む
+
+    様々な形式のメッシュファイル（.vtk, .vtp, .stl, .off, .obj, .gii）を
+    vtkPolyDataオブジェクトとして読み込みます。
+
+    Args:
+        fileName (Union[str, Path]): 読み込むファイルのパス
+
+    Returns:
+        vtk.vtkPolyData: 読み込まれたメッシュデータ
+
+    Raises:
+        ValueError: サポートされていないファイル形式の場合
+    """
     fname, extension = os.path.splitext(fileName)
     extension = extension.lower()
 
@@ -114,12 +141,20 @@ def ReadSurf(fileName):
     return surf
 
 
-def ComputeNormals(surf):
+def ComputeNormals(surf: 'vtk.vtkPolyData') -> 'vtk.vtkPolyData':
+    """メッシュの法線ベクトルを計算
+
+    Args:
+        surf (vtk.vtkPolyData): 入力メッシュ
+
+    Returns:
+        vtk.vtkPolyData: 法線が計算されたメッシュ
+    """
     normals = vtk.vtkPolyDataNormals()
-    normals.SetInputData(surf);
-    normals.ComputeCellNormalsOn();
-    normals.ComputePointNormalsOn();
-    normals.SplittingOff();
+    normals.SetInputData(surf)
+    normals.ComputeCellNormalsOn()
+    normals.ComputePointNormalsOn()
+    normals.SplittingOff()
     normals.Update()
     
     return normals.GetOutput()
@@ -129,14 +164,49 @@ def ComputeNormals(surf):
 
 
 
-def GetUnitSurf(surf, mean_arr = None, scale_factor = None, copy=True):
-  unit_surf, surf_mean, surf_scale = ScaleSurf(surf, mean_arr, scale_factor, copy)
-  return unit_surf
+def GetUnitSurf(
+    surf: 'vtk.vtkPolyData', 
+    mean_arr: Optional[np.ndarray] = None, 
+    scale_factor: Optional[float] = None, 
+    copy: bool = True
+) -> 'vtk.vtkPolyData':
+    """メッシュを単位空間に正規化
+
+    Args:
+        surf (vtk.vtkPolyData): 入力メッシュ
+        mean_arr (Optional[np.ndarray], optional): 中心座標. Defaults to None.
+        scale_factor (Optional[float], optional): スケール係数. Defaults to None.
+        copy (bool, optional): 入力を複製するかどうか. Defaults to True.
+
+    Returns:
+        vtk.vtkPolyData: 正規化されたメッシュ
+    """
+    unit_surf, surf_mean, surf_scale = ScaleSurf(surf, mean_arr, scale_factor, copy)
+    return unit_surf
 
 
 
 
-def ScaleSurf(surf, mean_arr = None, scale_factor = None, copy=True):
+def ScaleSurf(
+    surf: 'vtk.vtkPolyData', 
+    mean_arr: Optional[np.ndarray] = None, 
+    scale_factor: Optional[float] = None, 
+    copy: bool = True
+) -> Tuple['vtk.vtkPolyData', np.ndarray, float]:
+    """メッシュのスケーリングと中心化を行う
+
+    Args:
+        surf (vtk.vtkPolyData): 入力メッシュ
+        mean_arr (Optional[np.ndarray], optional): 中心座標. Defaults to None.
+        scale_factor (Optional[float], optional): スケール係数. Defaults to None.
+        copy (bool, optional): 入力を複製するかどうか. Defaults to True.
+
+    Returns:
+        Tuple[vtk.vtkPolyData, np.ndarray, float]: 
+            - スケーリングされたメッシュ
+            - 中心座標
+            - スケール係数
+    """
     if(copy):
         surf_copy = vtk.vtkPolyData()
         surf_copy.DeepCopy(surf)
@@ -180,7 +250,18 @@ def ScaleSurf(surf, mean_arr = None, scale_factor = None, copy=True):
     return surf, mean_arr, scale_factor
 
 
-def RandomRotation(surf):
+def RandomRotation(surf: 'vtk.vtkPolyData') -> Tuple['vtk.vtkPolyData', float, np.ndarray]:
+    """メッシュにランダムな回転を適用
+
+    Args:
+        surf (vtk.vtkPolyData): 入力メッシュ
+
+    Returns:
+        Tuple[vtk.vtkPolyData, float, np.ndarray]: 
+            - 回転されたメッシュ
+            - 回転角度
+            - 回転軸ベクトル
+    """
     rotationAngle = np.random.random()*360.0
     rotationVector = np.random.random(3)*2.0 - 1.0
     rotationVector = rotationVector/np.linalg.norm(rotationVector)
@@ -220,8 +301,18 @@ def GetColorArray(surf, array_name):
         colored_points.InsertNextTuple3(rgb[0], rgb[1], rgb[2])
     return colored_points
 
-def PolyDataToNumpy(surf):
+def PolyDataToNumpy(surf: 'vtk.vtkPolyData') -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """VTKメッシュデータをNumPy配列に変換
 
+    Args:
+        surf (vtk.vtkPolyData): 入力メッシュ
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: 
+            - 頂点座標配列
+            - 面の接続情報配列
+            - エッジの接続情報配列
+    """
     edges_filter = vtk.vtkExtractEdges()
     edges_filter.SetInputData(surf)
     edges_filter.Update()
@@ -233,8 +324,22 @@ def PolyDataToNumpy(surf):
     return verts, faces, edges
 
 
-def PolyDataToTensors(surf, device='cpu'):
+def PolyDataToTensors(
+    surf: 'vtk.vtkPolyData', 
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """VTKメッシュデータをPyTorchテンソルに変換
 
+    Args:
+        surf (vtk.vtkPolyData): 入力メッシュ
+        device (str, optional): 出力デバイス. Defaults to 'cpu'.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: 
+            - 頂点座標テンソル
+            - 面の接続情報テンソル
+            - エッジの接続情報テンソル
+    """
     verts, faces, edges = PolyDataToNumpy(surf)
     
     verts = ToTensor(dtype=torch.float32, device=device)(verts)
@@ -243,7 +348,16 @@ def PolyDataToTensors(surf, device='cpu'):
     
     return verts, faces, edges
 
-def CreateIcosahedron(radius, sl=0):
+def CreateIcosahedron(radius: float, sl: int = 0) -> 'vtk.vtkPolyData':
+    """正二十面体メッシュを生成
+
+    Args:
+        radius (float): 球の半径
+        sl (int, optional): 細分化レベル. Defaults to 0.
+
+    Returns:
+        vtk.vtkPolyData: 生成された正二十面体メッシュ
+    """
     icosahedronsource = vtk.vtkPlatonicSolidSource()
     icosahedronsource.SetSolidTypeToIcosahedron()
     icosahedronsource.Update()
@@ -261,7 +375,16 @@ def CreateIcosahedron(radius, sl=0):
 
 
 
-def normalize_points(poly, radius):
+def normalize_points(poly: 'vtk.vtkPolyData', radius: float) -> 'vtk.vtkPolyData':
+    """メッシュの頂点を指定された半径の球面上に正規化
+
+    Args:
+        poly (vtk.vtkPolyData): 入力メッシュ
+        radius (float): 目標半径
+
+    Returns:
+        vtk.vtkPolyData: 正規化されたメッシュ
+    """
     polypoints = poly.GetPoints()
     for pid in range(polypoints.GetNumberOfPoints()):
         spoint = polypoints.GetPoint(pid)
@@ -273,19 +396,27 @@ def normalize_points(poly, radius):
     return poly
 
 
-def ConvertFDI(surf, scal):
+def ConvertFDI(surf: 'vtk.vtkPolyData', scal: str) -> 'vtk.vtkPolyData':
+    """UniversalからFDI表記に歯のラベルを変換
 
-  LUT = np.array([0,18,17,16,15,14,13,12,11,21,22,23,24,25,26,27,28,
+    Args:
+        surf (vtk.vtkPolyData): 入力メッシュ
+        scal (str): スカラー配列の名前
+
+    Returns:
+        vtk.vtkPolyData: 変換後のメッシュ
+    """
+    LUT = np.array([0,18,17,16,15,14,13,12,11,21,22,23,24,25,26,27,28,
                   38,37,36,35,34,33,32,31,41,42,43,44,45,46,47,48,0])
-  # extract UniversalID array
-  labels = vtk_to_numpy(surf.GetPointData().GetScalars(scal))
-  
-  # convert to their numbering system
-  labels = LUT[labels]
-  vtk_id = numpy_to_vtk(labels)
-  vtk_id.SetName(scal)
-  surf.GetPointData().AddArray(vtk_id)
-  return surf
+    # extract UniversalID array
+    labels = vtk_to_numpy(surf.GetPointData().GetScalars(scal))
+    
+    # convert to their numbering system
+    labels = LUT[labels]
+    vtk_id = numpy_to_vtk(labels)
+    vtk_id.SetName(scal)
+    surf.GetPointData().AddArray(vtk_id)
+    return surf
 
 def SeparateLabels(surf, predicted_id: str, labels=None, output_path=None, print_out=True):
     """指定されたラベルをまとめて分離する

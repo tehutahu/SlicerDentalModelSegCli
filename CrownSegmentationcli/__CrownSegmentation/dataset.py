@@ -147,13 +147,35 @@ class TeethDataset(Dataset):
 
 
 class UnitSurfTransform:
+    """メッシュデータの正規化と回転を行う変換クラス
+
+    メッシュを単位空間に正規化し、オプションでランダムな回転を適用します。
+    データ拡張やモデルの学習前の前処理として使用されます。
+
+    Args:
+        random_rotation (bool): ランダムな回転を適用するかどうか。
+            True: ランダムな回転を適用
+            False: 回転を適用しない（デフォルト）
+
+    Example:
+        ```python
+        transform = UnitSurfTransform(random_rotation=True)
+        normalized_mesh = transform(input_mesh)
+        ```
+    """
 
     def __init__(self, random_rotation=False):
-        
         self.random_rotation = random_rotation
 
     def __call__(self, surf):
+        """変換を実行する
 
+        Args:
+            surf (vtkPolyData): 入力メッシュデータ
+
+        Returns:
+            vtkPolyData: 正規化（および必要に応じて回転）されたメッシュデータ
+        """
         surf = GetUnitSurf(surf)
         if self.random_rotation:
             surf, _a, _v = RandomRotation(surf)

@@ -1,18 +1,17 @@
 #!/usr/bin/env python-real
 
 import argparse
+from dataclasses import dataclass
+from datetime import datetime
+import logging
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
-from typing import NamedTuple
-import logging
-from datetime import datetime
-import pandas as pd
-from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
-import torch
 import numpy as np
+import pandas as pd
+import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
@@ -55,8 +54,15 @@ class SegmentationArgs(NamedTuple):
     chooseFDI: int
     logPath: str
 
-def setup_logger(log_path: Path):
-    """ロガーの設定"""
+def setup_logger(log_path: Path) -> logging.Logger:
+    """ロガーを設定し、ファイルとコンソールの両方に出力するように構成します。
+
+    Args:
+        log_path (Path): ログファイルのパス
+
+    Returns:
+        logging.Logger: 設定されたロガーインスタンス
+    """
     logger = logging.getLogger('CrownSegmentation')
     logger.setLevel(logging.INFO)
     
@@ -78,8 +84,15 @@ def setup_logger(log_path: Path):
     
     return logger
 
-def setup_model(args: SegmentationArgs):
-    """モデルのセットアップを行う"""
+def setup_model(args: SegmentationArgs) -> MonaiUNet:
+    """セグメンテーションモデルを初期化し、事前学習済みの重みを読み込みます。
+
+    Args:
+        args (SegmentationArgs): セグメンテーションの設定パラメータ
+
+    Returns:
+        MonaiUNet: GPUにロードされた学習済みモデル
+    """
     class_weights = None
 
     model = MonaiUNet(
@@ -91,8 +104,21 @@ def setup_model(args: SegmentationArgs):
     model.model.module.load_state_dict(torch.load(args.model))
     return model.to(torch.device('cuda'))
 
-def process_predictions(surf, predictions: torch.Tensor, args: SegmentationArgs):
-    """予測結果の後処理を実行"""
+def process_predictions(
+    surf: 'vtkPolyData', 
+    predictions: torch.Tensor, 
+    args: SegmentationArgs
+) -> 'vtkPolyData':
+    """予測結果に対して後処理（島の除去、クロージング処理）を実行します。
+
+    Args:
+        surf (vtkPolyData): 入力サーフェスデータ
+        predictions (torch.Tensor): モデルによる予測結果
+        args (SegmentationArgs): セグメンテーションの設定パラメータ
+
+    Returns:
+        vtkPolyData: 後処理が適用されたサーフェスデータ
+    """
     predictions = numpy_to_vtk(predictions.cpu().numpy())
     predictions.SetName(args.predictedId)
     surf.GetPointData().AddArray(predictions)
@@ -109,8 +135,20 @@ def process_predictions(surf, predictions: torch.Tensor, args: SegmentationArgs)
 
     return surf
 
-def save_outputs(surf, ds_name: str, patient_info: dict, args: SegmentationArgs):
-    """結果の保存処理を実行"""
+def save_outputs(
+    surf: 'vtkPolyData', 
+    ds_name: str, 
+    patient_info: Optional[dict], 
+    args: SegmentationArgs
+) -> None:
+    """処理結果をファイルに保存します。
+
+    Args:
+        surf (vtkPolyData): 保存するサーフェスデータ
+        ds_name (str): データセット名またはファイル名
+        patient_info (Optional[dict]): 患者情報（patient_id, jaw_typeを含む）
+        args (SegmentationArgs): セグメンテーションの設定パラメータ
+    """
     out_root = Path(args.output)
     
     # 患者情報がある場合は階層的な出力構造を作成
@@ -153,7 +191,18 @@ def save_outputs(surf, ds_name: str, patient_info: dict, args: SegmentationArgs)
 
     Write(surf, str(output_path), print_out=False)
 
-def main(args: SegmentationArgs):
+def main(args: SegmentationArgs) -> None:
+    """歯冠セグメンテーションの主処理を実行します。
+
+    モデルの読み込み、データの前処理、セグメンテーション予測、
+    後処理、結果の保存までの一連の処理を行います。
+
+    Args:
+        args (SegmentationArgs): セグメンテーションの設定パラメータ
+
+    Raises:
+        Exception: 処理中に発生した重大なエラー
+    """
     start_time = datetime.now()
     logger = setup_logger(Path(args.logPath))
     
@@ -240,7 +289,7 @@ if __name__ == '__main__':
     parser.add_argument(
         'input',
         type=str,
-        help='Input path: either a mesh file (.vtk/.stl) or a CSV file containing multiple inputs'
+        help='Input path: either a directory containing mesh files (.vtk/.stl/etc...), a single mesh file, or a CSV file containing multiple inputs'
     )
     parser.add_argument(
         'output',
