@@ -79,13 +79,13 @@ RUN chmod +x /app/CrownSegmentationcli/CrownSegmentationcli.py
 
 
 # 実行コマンド例
-# docker build -t dental-seg .
+# docker build -t dental-seg dockerfile/Dockerfile .
 #
 # docker run --rm --gpus all \
 #   -v /path/to/input/data:/data/input \
 #   -v /path/to/output:/data/output \
 #   -v /path/to/model:/data/model \
-#   dental-seg python3/CrownSegmentationcli.py \
+#   dental-seg python3 CrownSegmentationcli/CrownSegmentationcli.py \
 #   --input /data/input/your_model.vtk \
 #   --output /data/output/result.vtk \
 #   --model /data/model/segmentation_model.pth \
